@@ -31,9 +31,26 @@ const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("../templates/opencode_plugi
 /* DSH（DeepSeek Harness）不是「hook + JSON 配置」平台，而是 cordis 插件体系。
 Trellis Card 内置一个 dsh-trellis-bridge cordis 插件（多文件 npm 包），安装时
 复制到 ~/.config/trellis-card/agents/dsh-trellis-bridge/ 并用 `dsh plugin
---profile web add link:<dir>` 挂载到 dsh web profile；卸载时 `dsh plugin
---profile web remove` 并从 profile 移除。模板内嵌在 src-tauri/templates/dsh/。 */
-const DSH_PROFILE: &str = "web";
+--profile <p> add link:<dir>` 挂载（<p> = $TRELLIS_CARD_DSH_PROFILE，默认 web；
+$DSH_HOME 尊重自定义主目录）；卸载时 `dsh plugin --profile <p> remove`。模板内嵌在 src-tauri/templates/dsh/。 */
+/* DSH profile resolution (MAWF integration, task 09-17-mawf-four-tool-integration
+ID-3): the profile is no longer hardcoded — deepseek harness profiles vary
+(web/headless/custom), and `DSH_HOME` may relocate the whole tree. Resolution:
+  1. env TRELLIS_CARD_DSH_PROFILE (explicit user choice)
+  2. "web" (upstream default, kept for compatibility) */
+fn dsh_profile() -> String {
+    std::env::var("TRELLIS_CARD_DSH_PROFILE").unwrap_or_else(|_| "web".to_string())
+}
+
+/* DSH home: respect $DSH_HOME; fall back to ~/.dsh (upstream behavior). */
+fn dsh_home() -> PathBuf {
+    if let Ok(h) = std::env::var("DSH_HOME") {
+        if !h.trim().is_empty() {
+            return PathBuf::from(h);
+        }
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".dsh")
+}
 const DSH_BRIDGE_PACKAGE: &str = "dsh-trellis-bridge";
 /* 目录名必须等于 npm 包名 dsh-trellis-bridge：`dsh plugin add link:<dir>` 用目录名
 当包名注册，目录名不符会导致 profile 里出现错误的包名。 */
@@ -200,7 +217,7 @@ fn dsh_plugin(args: &[&str]) -> Result<String, String> {
         "无法定位 dsh CLI：请确认已安装 DeepSeek Harness（npm i -g @deepseek-ai/dsh）".to_string()
     })?;
     let output = Command::new(&bin)
-        .args(["plugin", "--profile", DSH_PROFILE])
+        .args(["plugin", "--profile", &dsh_profile()])
         .args(args)
         .output()
         .map_err(|e| format!("无法执行 dsh CLI：{e}（请确认已安装 DeepSeek Harness）"))?;
@@ -237,10 +254,9 @@ fn dsh_profile_manifest() -> PathBuf {
     if let Ok(path) = std::env::var("TRELLIS_CARD_DSH_PROFILE_MANIFEST") {
         return PathBuf::from(path);
     }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".dsh")
+    dsh_home()
         .join("profiles")
-        .join(DSH_PROFILE)
+        .join(dsh_profile())
         .join("package.json")
 }
 

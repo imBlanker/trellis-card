@@ -215,6 +215,10 @@ function byRecentActivity(a, b) {
 
 /* ---------- Tauri 调用 ---------- */
 function call(cmd, args) {
+  // MAWF transport seam (P5.2): companion 模式下由 mawf-transport.js 提供
+  // window.__MAWF_TRANSPORT__，把只读通道映射到 bridge providers；纯 Tauri
+  // 运行不经过这里（行为与上游逐字节一致）。
+  if (window.__MAWF_TRANSPORT__) return window.__MAWF_TRANSPORT__.invoke(cmd, args);
   if (!hasTauri) return Promise.reject(new Error('未在 Tauri 环境中运行'));
   return window.__TAURI__.core.invoke(cmd, args);
 }
@@ -242,6 +246,7 @@ function compareVersions(a, b) {
 }
 
 async function checkForUpdate() {
+  if (window.__MAWF_MANAGED__) return; // MAWF managed 模式：更新由 MAWF 组件清单管，不指向第三方 repo
   if (!hasTauri) return;
   try {
     const [localVersion, res] = await Promise.all([
