@@ -10,6 +10,7 @@ mod runtime;
 mod scan;
 mod session;
 mod watch;
+mod workspace;
 
 use config::AppConfig;
 use runtime::{ActionRecord, AgentRuntime, TaskRuntimeView, TrellisAction};
@@ -218,7 +219,7 @@ pub(crate) fn discover_all(cfg: &AppConfig) -> Vec<PathBuf> {
                 &dir.to_string_lossy(),
             )
         });
-        if dir.join(".trellis").join("tasks").is_dir() && !dup {
+        if workspace::is_project(&dir) && !dup {
             seen.insert(dir.clone());
             out.push(dir);
         }
@@ -258,7 +259,7 @@ fn project_dir_for_path(path: &Path) -> Option<PathBuf> {
         path.parent()?.to_path_buf()
     };
     loop {
-        if current.join(".trellis").join("tasks").is_dir() {
+        if workspace::is_project(&current) {
             return Some(platform::normalize_path(&current));
         }
         if !current.pop() {
@@ -398,6 +399,19 @@ fn build_runtime_snapshot(state: &AppState) -> RuntimeSnapshot {
     let mut errors = Vec::new();
     for project_dir in projects {
         let project = platform::strip_device_prefix(&project_dir.to_string_lossy());
+        let native_agents = match workspace::native_agents(&project_dir, now) {
+            Ok(agents) => agents,
+            Err(error) => {
+                errors.push(error);
+                Vec::new()
+            }
+        };
+        activities.extend(
+            native_agents
+                .iter()
+                .filter(|a| a.task_id.is_none())
+                .cloned(),
+        );
         let (tasks, task_errors) = scan::scan_tasks(&project_dir);
         errors.extend(task_errors);
         for task in tasks {
@@ -420,7 +434,16 @@ fn build_runtime_snapshot(state: &AppState) -> RuntimeSnapshot {
             let session = runtime
                 .sessions
                 .latest_for_task(&project, &task.id)
-                .or_else(|| runtime.sessions.latest_for_task(&project, &task.dir));
+                .or_else(|| runtime.sessions.latest_for_task(&project, &task.dir))
+                .or_else(|| {
+                    native_agents
+                        .iter()
+                        .filter(|a| {
+                            a.task_id.as_deref() == Some(&task.id)
+                                || a.task_id.as_deref() == Some(&task.dir)
+                        })
+                        .max_by_key(|a| a.updated_at)
+                });
             let action = runtime
                 .actions
                 .get(&task_key(&project, &task.id))
@@ -958,7 +981,42 @@ fn list_specs(state: State<AppState>, project: String) -> Result<Vec<SpecOut>, S
     if !is_allowed_project(&state, &project) {
         return Err("项目未在扫描目录中".into());
     }
-    let spec_root = expand(&project).join(".trellis").join("spec");
+    let layout = workspace::layout(&expand(&project))?;
+    let spec_root = layout.specs;
+    if layout.native {
+        let mut specs = Vec::new();
+        for path in workspace::checked_files(&spec_root)? {
+            if path.extension().is_none_or(|ext| ext != "md") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&spec_root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let line_count = content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            specs.push(SpecOut {
+                category: relative.split('/').next().unwrap_or("general").to_owned(),
+                name: path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                path: relative,
+                filled: line_count >= 40,
+                line_count,
+                referenced_by: 0,
+                paths: scan::extract_spec_paths(&content),
+                content,
+            });
+        }
+        specs.sort_by(|a, b| a.path.cmp(&b.path));
+        return Ok(specs);
+    }
     let mut specs = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&spec_root) {
         for e in entries.flatten() {
@@ -1157,7 +1215,11 @@ fn get_task(state: State<AppState>, project: String, id: String) -> Result<TaskD
         .into_iter()
         .find(|t| t.id == id || t.dir == id)
         .ok_or_else(|| "任务不存在".to_string())?;
-    let docs = collect_docs(&project_dir.join(".trellis").join("tasks").join(&task.dir));
+    let docs = collect_docs(&workspace::task_path(
+        &project_dir,
+        &task.dir,
+        task.archived,
+    )?);
     Ok(TaskDetail { task, docs })
 }
 
@@ -1213,6 +1275,20 @@ fn archive_task(
     project: String,
     task: String,
 ) -> Result<bool, String> {
+    let project_root = expand(&project);
+    if workspace::layout(&project_root)?.native {
+        if !is_allowed_project(&state, &project) {
+            return Err("项目未在扫描目录中".into());
+        }
+        workspace::archive(
+            &project_root,
+            &task,
+            &chrono::Local::now().format("%Y-%m").to_string(),
+        )?;
+        let _ = app.emit("tasks-changed", ());
+        let _ = app.emit("runtime-reconciliation-needed", ());
+        return Ok(true);
+    }
     let (project_dir, script) = resolve_archivable_task(&state, &project, &task)?;
     /* WSL 观察模式：项目在 \\wsl$\<distro>\... 下，task.py 只能由 WSL 内 Python
     执行（Windows Python 无法跨 9P 运行 shebang/相对路径）。经 wsl.exe 调用，
@@ -2138,5 +2214,38 @@ mod tests {
         assert_eq!(activity.unwrap().project, project_str);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn native_runtime_snapshot_fuses_independent_session_records() {
+        let root = std::env::temp_dir().join(format!("card-native-runtime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docs/plans/a")).unwrap();
+        std::fs::create_dir_all(root.join(".mawf/runtime/sessions")).unwrap();
+        std::fs::write(
+            root.join(".mawf/workspace.json"),
+            r#"{"version":1,"backend":"mawf","trellis":false}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/plans/a/task.json"),
+            r#"{"id":"a","status":"in_progress"}"#,
+        )
+        .unwrap();
+        let file = root.join(".mawf/runtime/sessions/real.json");
+        let mut session = serde_json::json!({"platform":"codex", "current_task":"docs/plans/a", "last_seen_at":chrono::Utc::now().to_rfc3339(), "status":"active"});
+        std::fs::write(&file, session.to_string()).unwrap();
+        let state = state_with_project(&root);
+        let snapshot = build_runtime_snapshot(&state);
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(
+            snapshot.tasks[0].display_state,
+            runtime::DisplayState::Working
+        );
+        session["status"] = serde_json::json!("stopped");
+        std::fs::write(&file, session.to_string()).unwrap();
+        let stopped = build_runtime_snapshot(&state);
+        assert_eq!(stopped.tasks[0].display_state, runtime::DisplayState::Idle);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

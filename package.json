@@ -7,8 +7,9 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "test": "node -e \"const fs=require('fs');const {execFileSync}=require('child_process');if(fs.existsSync('test'))execFileSync(process.execPath,['--test','test/focus-policy.test.js','test/activity-display.test.js','test/smoke.test.js'],{stdio:'inherit'});\" && cargo test --manifest-path src-tauri/Cargo.toml --quiet",
-    "check": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+    "test": "node --test && cargo test --manifest-path src-tauri/Cargo.toml --quiet",
+    "check": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "test:js": "node --test"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

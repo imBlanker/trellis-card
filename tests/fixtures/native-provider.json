@@ -1,0 +1,11 @@
+{
+  "workspace.describe": {"machineId":"fixture-machine","label":"local:/fixture","root":"/fixture","protocolVersion":1},
+  "project.list": {"projects":[{"id":"fixture","hasTrellis":false,"backend":"mawf","hasWorkspace":true}]},
+  "project.tasks": {"epoch":7,"tasks":[{"id":"task-one","name":"task-one","title":"One","status":"in_progress","priority":"P1"}]},
+  "task.get": {"id":"task-one","task":{"id":"task-one","title":"One","status":"in_progress","priority":"P1","createdAt":"2026-10-01","subtasks":[{"name":"first","status":"done"},{"name":"second","status":"pending"}]},"hasPrd":true,"hasDesign":false,"hasImplement":false},
+  "project.relations": {"groups":[{"task":"task-one","files":["docs/engineering/specs/backend/api.md"]}]},
+  "project.specs": {"specs":[{"name":"backend","filled":true}],"files":[{"rel":"docs/engineering/specs/backend/api.md","bytes":9,"mtime":100}]},
+  "runtime.snapshot": {"epoch":3,"sessions":[{"sessionId":"real-id","platform":"codex","currentTask":"docs/plans/task-one","lastSeenAt":"2026-10-12T00:00:00Z","scopedKey":"m:fixture:real-id","status":"stopped","endedAt":"2026-10-12T00:01:00Z"}],"warnings":[],"incidents":{"open":0}},
+  "artifact.list": {"artifacts":[{"rel":"docs/plans/task-one/prd.md","bytes":10,"mtime":100},{"rel":"docs/history/tasks/2026-09/old/task.json","bytes":32,"mtime":100},{"rel":"docs/history/tasks/2026-09/old/prd.md","bytes":8,"mtime":100}]},
+  "bodies": {"docs/plans/task-one/prd.md":"acceptance","docs/history/tasks/2026-09/old/task.json":"{\"id\":\"old\",\"status\":\"completed\"}","docs/history/tasks/2026-09/old/prd.md":"old body","docs/engineering/specs/backend/api.md":"contract\n"}
+}

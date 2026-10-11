@@ -176,3 +176,9 @@ Hook 只需安装一次，即可观察多个项目。若已进入主界面，可
 ## 友链
 
 - LinuxDo — https://linux.do
+
+## Native MAWF workspaces
+
+The existing Trellis adapter remains supported. Projects with an explicit MAWF
+workspace marker can use native task, specification, archive and session storage.
+See [native workspace compatibility](docs/MAWF_NATIVE_WORKSPACES.md).

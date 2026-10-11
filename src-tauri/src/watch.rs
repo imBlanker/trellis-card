@@ -12,14 +12,24 @@ const EVENT: &str = "tasks-changed";
 const RUNTIME_EVENT: &str = "runtime-reconciliation-needed";
 
 pub fn is_relevant_task_event(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.contains("/.mawf/runtime/sessions/") && normalized.ends_with(".json") {
+        return true;
+    }
+    if normalized.contains("/docs/history/tasks/")
+        || normalized.contains("/docs/engineering/specs/")
+    {
+        return true;
+    }
     let comps: Vec<String> = path
         .components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect();
-    let Some(index) = comps
-        .windows(3)
-        .position(|parts| parts[0] == ".trellis" && parts[1] == "tasks" && !parts[2].is_empty())
-    else {
+    let Some(index) = comps.windows(3).position(|parts| {
+        ((parts[0] == ".trellis" && parts[1] == "tasks")
+            || (parts[0] == "docs" && parts[1] == "plans"))
+            && !parts[2].is_empty()
+    }) else {
         return false;
     };
     let rest = &comps[index + 3..];
@@ -43,7 +53,14 @@ fn discover_trellis_dirs() -> Vec<PathBuf> {
     let cfg = crate::config::load();
     crate::discover_all(&cfg)
         .iter()
-        .map(|p| p.join(".trellis"))
+        .flat_map(|p| match crate::workspace::layout(p) {
+            Ok(layout) if layout.native => vec![p.join("docs"), p.join(".mawf")],
+            Ok(_) => vec![p.join(".trellis")],
+            Err(error) => {
+                eprintln!("[watch] {error}");
+                Vec::new()
+            }
+        })
         .filter(|p| p.is_dir())
         .collect()
 }
@@ -94,7 +111,7 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
         };
         let mut watched: Vec<PathBuf> = Vec::new();
         sync_watches(&mut watcher, &mut watched);
-        println!("[watch] 已启动，监听 {} 个 .trellis 目录", watched.len());
+        println!("[watch] 已启动，监听 {} 个工作区目录", watched.len());
 
         let mut dirty_at: Option<Instant> = None;
         let mut last_tick = Instant::now();

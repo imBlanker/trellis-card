@@ -138,7 +138,10 @@ fn count_jsonl_entries(path: &Path) -> usize {
 // research/ 等任务私有路径返回 false，不计入共享 spec 聚类。
 fn is_spec_ref(p: &str) -> bool {
     let norm = p.replace('\\', "/");
-    norm.starts_with(".trellis/spec/") || norm.starts_with("spec/") || norm.contains("/spec/")
+    norm.starts_with("docs/engineering/specs/")
+        || norm.starts_with(".trellis/spec/")
+        || norm.starts_with("spec/")
+        || norm.contains("/spec/")
 }
 
 // 解析 jsonl 中引用的共享 spec 文件路径（去重、保持顺序）。
@@ -188,7 +191,11 @@ fn collect_prd_refs(task_dir: &Path) -> Vec<String> {
                 .filter_map(|line| {
                     let norm = line.replace('\\', "/");
                     // 匹配 .trellis/tasks/<id>/（含 Windows 反斜杠归一化）
-                    let marker = ".trellis/tasks/";
+                    let marker = if norm.contains("docs/plans/") {
+                        "docs/plans/"
+                    } else {
+                        ".trellis/tasks/"
+                    };
                     let idx = norm.find(marker)?;
                     let rest = &norm[idx + marker.len()..];
                     let id = rest.split(['/', ' ', '`', ')', '"', '\'']).next()?;
@@ -286,25 +293,43 @@ struct RawSession {
     platform: String,
     last_seen_at: String,
     current_task: Option<String>,
+    status: Option<String>,
 }
 
 // 读取项目的全部会话文件，返回 任务目录名 → 会话列表
 fn scan_sessions(project_dir: &Path) -> std::collections::HashMap<String, Vec<SessionInfo>> {
     let mut map: std::collections::HashMap<String, Vec<SessionInfo>> = Default::default();
-    let dir = project_dir
-        .join(".trellis")
-        .join(".runtime")
-        .join("sessions");
+    let Ok(layout) = crate::workspace::layout(project_dir) else {
+        return map;
+    };
+    let dir = layout.sessions;
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return map,
     };
     for e in entries.flatten() {
         if e.path().extension().map(|x| x == "json").unwrap_or(false) {
-            let raw: RawSession = fs::read_to_string(e.path())
+            let session_path = if layout.native {
+                match crate::workspace::checked(
+                    project_dir,
+                    &format!(".mawf/runtime/sessions/{}", e.file_name().to_string_lossy()),
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        eprintln!("[sessions] {error}");
+                        continue;
+                    }
+                }
+            } else {
+                e.path()
+            };
+            let raw: RawSession = fs::read_to_string(session_path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
+            if layout.native && raw.status.as_deref() == Some("stopped") {
+                continue;
+            }
             // current_task 形如 ".trellis/tasks/<dir>"（Windows 可能是反斜杠，先归一化）
             let task_dir = raw
                 .current_task
@@ -461,7 +486,7 @@ pub fn discover_projects(root: &Path, max_depth: usize) -> Vec<PathBuf> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        if is_directory(&dir.join(".trellis").join("tasks")) {
+        if crate::workspace::is_project(&dir) {
             found.push(dir);
         }
         for e in entries.flatten() {
@@ -497,6 +522,9 @@ struct TaskLocation<'a> {
 
 // 读取 .trellis/.developer 中针对当前开发者的 workflow 覆盖（workflow=<id>）
 fn read_developer_workflow(project_dir: &Path) -> Option<String> {
+    if crate::workspace::layout(project_dir).ok()?.native {
+        return None;
+    }
     let dev_file = project_dir.join(".trellis").join(".developer");
     let content = fs::read_to_string(dev_file).ok()?;
     for line in content.lines() {
@@ -517,6 +545,9 @@ fn read_developer_workflow(project_dir: &Path) -> Option<String> {
 
 // 读取 .trellis/config.yaml 中团队共享的 default_workflow 配置
 fn read_config_default_workflow(project_dir: &Path) -> Option<String> {
+    if crate::workspace::layout(project_dir).ok()?.native {
+        return None;
+    }
     let config_file = project_dir.join(".trellis").join("config.yaml");
     let content = fs::read_to_string(config_file).ok()?;
     for line in content.lines() {
@@ -686,16 +717,29 @@ pub fn scan_tasks_with_archived(project_dir: &Path) -> (Vec<Task>, Vec<String>) 
 // 只扫描 archive/ 下的已归档任务（懒加载：前端勾选「显示已归档」或聚焦归档任务时才调用，
 // 避免常规轮询每次都扫 archive/ 拖慢全项目扫描）。version 语义由调用方单独计算。
 pub fn scan_archived(project_dir: &Path) -> (Vec<Task>, Vec<String>) {
-    let tasks_dir = project_dir.join(".trellis").join("tasks");
+    let layout = match crate::workspace::layout(project_dir) {
+        Ok(layout) => layout,
+        Err(error) => return (Vec::new(), vec![error]),
+    };
+    let tasks_dir = layout.tasks;
     let mut tasks = Vec::new();
     let mut errors = Vec::new();
-    let archive_dir = tasks_dir.join("archive");
+    let archive_dir = layout.archive;
+    if layout.native {
+        if let Err(error) = crate::workspace::checked_files(&archive_dir) {
+            return (Vec::new(), vec![error]);
+        }
+    }
     if is_directory(&archive_dir) {
         let sessions = scan_sessions(project_dir);
         let dev_workflow = read_developer_workflow(project_dir);
         let config_workflow = read_config_default_workflow(project_dir);
         scan_archived_dir(
-            &tasks_dir,
+            if layout.native {
+                &archive_dir
+            } else {
+                &tasks_dir
+            },
             &archive_dir,
             &sessions,
             dev_workflow.as_deref(),
@@ -703,6 +747,11 @@ pub fn scan_archived(project_dir: &Path) -> (Vec<Task>, Vec<String>) {
             &mut tasks,
             &mut errors,
         );
+    }
+    if layout.native {
+        for task in &mut tasks {
+            task.dir = format!("archive/{}", task.dir);
+        }
     }
     tasks.sort_by(|a, b| {
         a.created_at
@@ -715,11 +764,24 @@ pub fn scan_archived(project_dir: &Path) -> (Vec<Task>, Vec<String>) {
 }
 
 fn scan_tasks_inner(project_dir: &Path, include_archived: bool) -> (Vec<Task>, Vec<String>) {
-    let tasks_dir = project_dir.join(".trellis").join("tasks");
+    let layout = match crate::workspace::layout(project_dir) {
+        Ok(layout) => layout,
+        Err(error) => return (Vec::new(), vec![error]),
+    };
+    let tasks_dir = layout.tasks;
     let mut tasks = Vec::new();
     let mut errors = Vec::new();
+    if layout.native {
+        if let Err(error) = crate::workspace::checked_files(&tasks_dir) {
+            return (Vec::new(), vec![error]);
+        }
+    }
     if !is_directory(&tasks_dir) {
-        return (tasks, errors);
+        return if layout.native && include_archived {
+            scan_archived(project_dir)
+        } else {
+            (tasks, errors)
+        };
     }
     let sessions = scan_sessions(project_dir);
     let dev_workflow = read_developer_workflow(project_dir);
@@ -768,6 +830,11 @@ fn scan_tasks_inner(project_dir: &Path, include_archived: bool) -> (Vec<Task>, V
             &mut tasks,
             &mut errors,
         );
+    }
+    if layout.native && include_archived {
+        let (archived, archived_errors) = scan_archived(project_dir);
+        tasks.extend(archived);
+        errors.extend(archived_errors);
     }
     tasks.sort_by(|a, b| {
         a.created_at

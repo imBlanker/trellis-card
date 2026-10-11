@@ -17,6 +17,11 @@ jobs:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux desktop dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -37,4 +42,4 @@ jobs:
         with:
           node-version: 20
       - run: npm ci || npm install
-      - run: npm test
+      - run: npm run test:js
